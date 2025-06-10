@@ -42,11 +42,12 @@ FTP_PASS = ftp_config["FTP_PASS"]
 FTP_BASE_DIR = ftp_config["FTP_BASE_DIR"]
 FTP_FATTURE_DIR = ftp_config["FTP_FATTURE_DIR"]
 LOCAL_IMPORT_DIR = ftp_config["LOCAL_IMPORT_DIR"]
+TEMP_IMPORT_DIR = os.path.join(LOCAL_IMPORT_DIR, "temporane")
 
 FILE_LIST = ["ANAINT", "BARCODE", "ARTBIL", "VPREZZI", "PROMO"]
 SAVE_DIR = os.path.join(LOCAL_IMPORT_DIR, "SAVE")
 SESSIONE_PATH = os.path.join(LOCAL_IMPORT_DIR, "sessione.txt")
-DOCFOR_PATH = os.path.join(LOCAL_IMPORT_DIR, "DOCFOR")
+DOCFOR_PATH = os.path.join(TEMP_IMPORT_DIR, "DOCFOR")
 
 # === STATO ===
 import_started = False 
@@ -158,7 +159,7 @@ def salva_copia(nome_file):
         return
     os.makedirs(SAVE_DIR, exist_ok=True)
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    src = os.path.join(LOCAL_IMPORT_DIR, nome_file)
+    src = os.path.join(TEMP_IMPORT_DIR, nome_file)
     dst = os.path.join(SAVE_DIR, f"{now}_{nome_file}")
     if os.path.exists(src):
         shutil.copy2(src, dst)
@@ -215,6 +216,7 @@ def run_import():
                 return
 
             os.makedirs(LOCAL_IMPORT_DIR, exist_ok=True)
+            os.makedirs(TEMP_IMPORT_DIR, exist_ok=True)
             os.makedirs(SAVE_DIR, exist_ok=True)
 
             if os.path.exists(SESSIONE_PATH):
@@ -236,7 +238,7 @@ def run_import():
                     continue
                 try:
                     local_name = "PROMOZIONI" if fname == "PROMO" else fname
-                    local_path = os.path.join(LOCAL_IMPORT_DIR, local_name)
+                    local_path = os.path.join(TEMP_IMPORT_DIR, local_name)
                     with open(local_path, "wb") as f:
                         ftp.retrbinary(f"RETR " + fname, f.write)
                     pulisci_file_finale(local_path)
@@ -275,6 +277,31 @@ def run_import():
 
 
             ftp.quit()
+
+            # Spostamento dei file da TEMP_IMPORT_DIR a LOCAL_IMPORT_DIR
+            if os.path.exists(TEMP_IMPORT_DIR):
+                safe_insert(f"Spostamento files da {TEMP_IMPORT_DIR} a {LOCAL_IMPORT_DIR}...")
+                for filename in os.listdir(TEMP_IMPORT_DIR):
+                    if terminate_import:
+                        return # Check di terminazione anche durante lo spostamento
+                    source_path = os.path.join(TEMP_IMPORT_DIR, filename)
+                    destination_path = os.path.join(LOCAL_IMPORT_DIR, filename)
+                    try:
+                        shutil.move(source_path, destination_path)
+                        safe_insert(f"Spostato: {filename} in {LOCAL_IMPORT_DIR}")
+                    except Exception as e:
+                        safe_insert(f"Errore spostamento {filename}: {e}")
+                        # Potresti voler gestire l'errore in modo più specifico qui
+
+                # Eliminazione della cartella temporanea dopo lo spostamento
+                try:
+                    shutil.rmtree(TEMP_IMPORT_DIR)
+                    safe_insert(f"Cartella temporanea {TEMP_IMPORT_DIR} eliminata.")
+                except Exception as e:
+                    safe_insert(f"Errore eliminazione {TEMP_IMPORT_DIR}: {e}")
+            else:
+                safe_insert(f"Cartella temporanea {TEMP_IMPORT_DIR} non trovata per lo spostamento.")
+
             safe_progress("Attendere l'importazione dei file su STORE...")
 
             imported_files = [f.replace("PROMO", "PROMOZIONI") for f in FILE_LIST]
