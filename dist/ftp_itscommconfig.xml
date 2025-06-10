@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <ftp>
+        <host>affiliati.diperspesa.it</host>
+        <user>GCAFF103</user>
+        <password>$af103user</password>
+        <base_dir>/Gescom/ftpaffiliati/00103</base_dir>
+    </ftp>
+    <local>
+        <import_dir>\\192.168.1.197\store\USER\IMPORT</import_dir>
+    </local>
+</config>
