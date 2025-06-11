@@ -1,6 +1,8 @@
 
 import sys
 import os
+import glob # For listing files, though os.listdir can also be used
+import re # For parsing with regular expressions
 import threading
 import tkinter as tk
 from tkinter import messagebox
@@ -42,6 +44,7 @@ FTP_PASS = ftp_config["FTP_PASS"]
 FTP_BASE_DIR = ftp_config["FTP_BASE_DIR"]
 FTP_FATTURE_DIR = ftp_config["FTP_FATTURE_DIR"]
 LOCAL_IMPORT_DIR = ftp_config["LOCAL_IMPORT_DIR"]
+LOG_DIR_PATH = os.path.join(LOCAL_IMPORT_DIR, "Log")
 TEMP_IMPORT_DIR = os.path.join(LOCAL_IMPORT_DIR, "temporane")
 
 FILE_LIST = ["ANAINT", "BARCODE", "ARTBIL", "VPREZZI", "PROMO"]
@@ -218,10 +221,77 @@ def remove_selected_characters_from_file(path_file):
     # else: No special characters found, no need to rewrite the file.
 
 
+def find_latest_log_file(log_dir_path):
+    if not os.path.isdir(log_dir_path):
+        print(f"[DEBUG] Log directory not found: {log_dir_path}")
+        return None
+
+    # Get a list of all files in the log directory
+    # Using os.listdir and then filtering might be more explicit than glob
+    # if we only want files, not subdirectories (though logs are typically files).
+    try:
+        list_of_files = [os.path.join(log_dir_path, f) for f in os.listdir(log_dir_path) if os.path.isfile(os.path.join(log_dir_path, f))]
+    except OSError as e:
+        print(f"[DEBUG] Error listing files in log directory {log_dir_path}: {e}")
+        return None
+
+    if not list_of_files:
+        print(f"[DEBUG] No files found in log directory: {log_dir_path}")
+        return None
+
+    # Find the latest file based on modification time
+    try:
+        latest_file = max(list_of_files, key=os.path.getmtime)
+    except Exception as e: # Catch potential errors like file not found if deleted during check
+        print(f"[DEBUG] Error finding latest file in {log_dir_path}: {e}")
+        return None
+
+    return latest_file
+
+
+def check_log_file_for_errors(log_file_path, file_keys):
+    '''
+    Checks a log file for errors based on content between START and END markers for given file keys.
+    Returns a dictionary where keys are file_keys with errors, and values are the error lines found.
+    Returns an empty dictionary if no errors are found.
+    '''
+    errors_found = {}
+    if not log_file_path or not os.path.exists(log_file_path):
+        print(f"[DEBUG] Log file not provided or not found: {log_file_path}")
+        return {"GENERAL_ERROR": [f"Log file not found: {os.path.basename(log_file_path) if log_file_path else 'N/A'}"]}
+
+    try:
+        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f: # Assuming UTF-8 for logs, common for modern systems
+            log_content = f.read()
+    except Exception as e:
+        print(f"Errore lettura file log {log_file_path}: {e}")
+        return {"GENERAL_ERROR": [f"Could not read log file: {os.path.basename(log_file_path)} - {e}"]}
+
+    for key in file_keys:
+        # Regex to find content between START and END markers for the current key.
+        # It uses re.DOTALL so that '.' matches newlines, capturing multi-line error messages.
+        # Non-greedy match (.*?) is important.
+        pattern = re.compile(r"------>\s*" + re.escape(key) + r"\s*START\s*<------\s*(.*?)\s*------>\s*" + re.escape(key) + r"\s*END\s*<------", re.DOTALL)
+
+        matches = pattern.findall(log_content)
+
+        for match_content in matches:
+            # Remove leading/trailing whitespace from the matched content between START and END
+            inner_content = match_content.strip()
+            if inner_content: # If there's anything left after stripping, it's an error.
+                if key not in errors_found:
+                    errors_found[key] = []
+                # Add the found error lines, splitting by newline for readability if it's multi-line
+                errors_found[key].extend(inner_content.splitlines())
+
+    return errors_found
+
+
 def run_import():
     global import_started
     import_started = True
     def task():
+        FILE_KEYS_FOR_LOG = ["ANAINT", "BARCODE", "VPREZZI", "PROMOZIONI", "DOCFOR"]
         
         root.after(0, lambda: (
             btn_download.pack_forget(),
@@ -370,13 +440,67 @@ def run_import():
             except Exception as e:
                 print(f"Errore durante l'eliminazione dei file dall'FTP: {e}")
 
-            safe_progress("Importazione completata con successo!")
-            root.after(0, lambda: (
-                dots_frame.pack_forget(),
-                logo_label.pack_forget(),
-                messagebox.showinfo("Completato", "Importazione completata con successo."),
-                root.destroy()
-            ))
+            # New log checking logic starts here
+            log_file_to_check = find_latest_log_file(LOG_DIR_PATH) # LOG_DIR_PATH should be globally available
+
+            final_message_title = "Completato"
+            final_message_text = "Importazione completata con successo."
+            show_standard_success_popup = True
+
+            if log_file_to_check:
+                safe_progress(f"Controllo log: {os.path.basename(log_file_to_check)}...")
+                log_errors = check_log_file_for_errors(log_file_to_check, FILE_KEYS_FOR_LOG)
+
+                if log_errors:
+                    show_standard_success_popup = False
+                    error_summary_parts = [f"Problemi riscontrati nel file di log ({os.path.basename(log_file_to_check)}):"]
+                    for key, messages in log_errors.items():
+                        error_summary_parts.append(f"\n--- {key} ---")
+                        for msg in messages:
+                            error_summary_parts.append(msg)
+
+                    full_error_summary = "\n".join(error_summary_parts)
+
+                    # Update progress label on GUI
+                    safe_progress("Importazione completata con errori nel log. Vedi dettagli.")
+
+                    # Show detailed error message in a messagebox
+                    # Using root.after to ensure it's called from the main thread
+                    root.after(0, lambda: messagebox.showwarning("Log con Errori", full_error_summary))
+
+                    try:
+                        # Attempt to open the log file for the user
+                        os.startfile(log_file_to_check)
+                    except AttributeError:
+                        print("[DEBUG] os.startfile non disponibile su questo sistema.")
+                        root.after(0, lambda: messagebox.showinfo("Info Log", f"Non è stato possibile aprire il file di log automaticamente.\nPuoi trovarlo qui: {log_file_to_check}"))
+                    except Exception as e_startfile:
+                        print(f"[DEBUG] Errore apertura file log con os.startfile: {e_startfile}")
+                        root.after(0, lambda: messagebox.showinfo("Info Log", f"Non è stato possibile aprire il file di log automaticamente.\nPuoi trovarlo qui: {log_file_to_check}"))
+
+                else: # Log file found and checked, no errors
+                    safe_progress("Importazione completata e log verificato senza errori.")
+                    # final_message_title/text remain as default "Completato" / "Importazione completata con successo."
+                    # show_standard_success_popup remains True
+
+            else: # No log file found
+                show_standard_success_popup = False # Don't show the full success if log is missing
+                safe_progress("Importazione completata. File di log non trovato per verifica.")
+                # Using root.after for messagebox
+                root.after(0, lambda: messagebox.showwarning("Verifica Log Mancante",
+                                                             f"Importazione FTP completata, ma non è stato possibile trovare un file di log in {LOG_DIR_PATH} per confermare l'elaborazione da parte di STORE."))
+
+            # Original success message display, now conditional
+            if show_standard_success_popup:
+                safe_progress(final_message_text) # Update progress label one last time
+                root.after(0, lambda: (
+                    messagebox.showinfo(final_message_title, final_message_text),
+                    root.destroy()
+                ))
+            else:
+                # If not showing standard success, just destroy root after a delay
+                if not terminate_import: # Only if not already terminating due to other reasons
+                    root.after(2000, root.destroy)
 
         except Exception as e:
             error_msg = f"{str(e)}"
