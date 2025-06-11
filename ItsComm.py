@@ -178,7 +178,7 @@ def safe_progress(text):
         root.after(0, lambda: progress_label.config(text=text))
 
 
-def pulisci_file_finale(path_file):
+def trim_trailing_special_chars(path_file):
     if not os.path.exists(path_file):
         return
     with open(path_file, "rb") as f:
@@ -190,6 +190,102 @@ def pulisci_file_finale(path_file):
         print(f"[DEBUG] Rimossi {original_length - len(content)} byte finali da {os.path.basename(path_file)}")
     with open(path_file, "wb") as f:
         f.write(content)
+
+
+def remove_lines_with_special_chars(path_file):
+    if not os.path.exists(path_file):
+        return
+
+    line_delimiter = b'*'
+    special_chars = (0x1A, 0x1C) # SUB and FS
+
+    try:
+        with open(path_file, "rb") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Errore lettura file {path_file} in remove_lines_with_special_chars: {e}")
+        return
+
+    if not content:
+        return # Empty file, nothing to do
+
+    # Split content into lines. If content ends with delimiter, split will produce an empty string at the end.
+    lines = content.split(line_delimiter)
+
+    # Determine if original content ended with a delimiter.
+    # This is important for reconstructing the trailing delimiter if all lines are kept or some lines are kept.
+    original_ended_with_delimiter = content.endswith(line_delimiter)
+
+    cleaned_lines = []
+    modified = False
+    for i, line_bytes in enumerate(lines):
+        # If the original content ended with a delimiter, the last "line" from split() will be empty.
+        # We should not check this empty part for special characters if it's just due to a trailing delimiter.
+        if i == len(lines) - 1 and line_bytes == b'' and original_ended_with_delimiter:
+            # This is the empty part after the last delimiter, keep it as is to preserve trailing delimiter later
+            cleaned_lines.append(line_bytes)
+            continue
+
+        contains_special_char = False
+        for byte_val in line_bytes:
+            if byte_val in special_chars:
+                contains_special_char = True
+                break
+
+        if contains_special_char:
+            modified = True
+        else:
+            cleaned_lines.append(line_bytes)
+
+    if modified:
+        # Reconstruct the content.
+        # If cleaned_lines is empty (all lines removed), new_content will be empty.
+        # If cleaned_lines has one item (which was empty itself, from a file like "*"),
+        # joining it results in empty, then add delimiter.
+        # If cleaned_lines has ["line1",""], joining gives "line1*", if it was ["line1"], gives "line1"
+
+        new_content = line_delimiter.join(cleaned_lines)
+
+        # Handle the case where all lines are removed. new_content would be b''
+        # If original_ended_with_delimiter was true, and new_content is not empty,
+        # or if new_content is empty but it was originally just "*", it should end with a delimiter.
+        # A simpler rule: if the cleaned list is not identical to just a single empty string (which means all actual lines were removed from a file that was not just "*"),
+        # and the original ended with a delimiter, ensure the new one also does.
+        # Or, more simply: if there's any content left, or if the original file was just "*" or "content*", ensure the trailing delimiter.
+
+        # If all lines were removed, new_content is b''.
+        # If some lines remain, or if the file was originally only `b"*"` (cleaned_lines = [b'', b''])
+        # and the first part is kept, it should end with b'*'
+
+        # Let's refine the trailing delimiter logic for reconstruction:
+        # 1. If all lines were removed, new_content is empty. This is correct.
+        # 2. If some lines remain:
+        #    The `lines.split(delimiter)` behavior:
+        #    - b"line1*line2*".split(b'*') -> [b'line1', b'line2', b'']
+        #    - b"line1*line2".split(b'*')  -> [b'line1', b'line2'] (WRONG ASSUMPTION, split always makes last empty if ends with)
+        #    Actually, `content.split(line_delimiter)` is fine. If content ends with `*`, last element of `lines` is `b''`.
+        #    If this `b''` is preserved in `cleaned_lines` (because it's the last element and `original_ended_with_delimiter` is true),
+        #    then `line_delimiter.join(cleaned_lines)` will correctly end with a delimiter.
+        #    Example: lines = [b'good', b'bad', b''], special in 'bad'. cleaned_lines = [b'good', b'']. join -> b'good*'
+        #    Example: lines = [b'good1', b'good2', b''], no special. cleaned_lines = [b'good1', b'good2', b''] -> join -> b'good1*good2*'
+        #    Example: lines = [b'bad', b''], special in 'bad'. cleaned_lines = [b'']. join -> b'' (This needs care if original was just "*")
+
+        # If cleaned_lines is [b''], it means either all actual lines were removed leaving only the trailing empty part,
+        # or the original file was just b"*".
+        if new_content == b'' and original_ended_with_delimiter and not (len(cleaned_lines) == 1 and cleaned_lines[0] == b''):
+             # This case is tricky: if all actual content lines are removed, new_content is b''.
+             # We probably don't want to add back a '*' if it's truly empty.
+             # If original was `b"bad*"` -> lines `[b'bad', b'']`. cleaned_lines `[b'']`. new_content `b''`. Correct.
+             # If original was `b"*"` -> lines `[b'', b'']`. cleaned_lines `[b'', b'']`. new_content `b'*'`. Correct.
+             pass # Let join handle it.
+
+        try:
+            with open(path_file, "wb") as f:
+                f.write(new_content)
+            print(f"[DEBUG] Rimosse righe con caratteri speciali da {os.path.basename(path_file)} usando '*' come delimitatore.")
+        except Exception as e:
+            print(f"Errore scrittura file {path_file} in remove_lines_with_special_chars: {e}")
+    # else: no modification needed, don't rewrite the file
 
 
 def run_import():
@@ -241,7 +337,7 @@ def run_import():
                     local_path = os.path.join(TEMP_IMPORT_DIR, local_name)
                     with open(local_path, "wb") as f:
                         ftp.retrbinary(f"RETR " + fname, f.write)
-                    pulisci_file_finale(local_path)
+                    remove_lines_with_special_chars(local_path)
                     safe_insert(f"Scaricato: {fname}")
                     salva_copia(local_name)
                     files_trovati += 1
@@ -260,7 +356,7 @@ def run_import():
                         ftp.retrbinary(f"RETR {file}", docfor.write)
                         safe_insert(f"Fattura → DOCFOR: {file}")
                 salva_copia("DOCFOR")
-                pulisci_file_finale(DOCFOR_PATH)
+                trim_trailing_special_chars(DOCFOR_PATH)
                 files_trovati += 1  # Segnalo che almeno un file di fatture è stato scaricato
 
             # Se non ho scaricato nessun file, esco e mostro messaggio
