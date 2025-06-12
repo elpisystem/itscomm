@@ -52,6 +52,14 @@ SAVE_DIR = os.path.join(LOCAL_IMPORT_DIR, "SAVE")
 SESSIONE_PATH = os.path.join(LOCAL_IMPORT_DIR, "sessione.txt")
 DOCFOR_PATH = os.path.join(TEMP_IMPORT_DIR, "DOCFOR")
 
+LINE_LENGTHS_MAP = {
+    "BARCODE": 100,
+    "ANAINT": 300,
+    "VPREZZI": 68,
+    "ARTBIL": 804,
+    "PROMOZIONI": 150  # Corresponds to "PROMO" in FILE_LIST
+}
+
 # === STATO ===
 import_started = False 
 terminate_import = False  # flag di terminazione
@@ -221,6 +229,78 @@ def remove_selected_characters_from_file(path_file):
     # else: No special characters found, no need to rewrite the file.
 
 
+def process_lines_by_length(file_path, file_key, line_lengths_map):
+    """
+    Processes a file line by line. If a line's length does not match the
+    expected length for the given file_key, its first character is removed.
+    This is a one-time removal per line.
+
+    Args:
+        file_path (str): The path to the file to process.
+        file_key (str): The key representing the file type (e.g., "ANAINT", "BARCODE").
+        line_lengths_map (dict): A dictionary mapping file_keys to their expected line lengths.
+    """
+    if file_key not in line_lengths_map:
+        # This file type does not have a defined line length to check, so skip.
+        # print(f"[DEBUG] No line length defined for {file_key} ({file_path}), skipping line processing.")
+        return
+
+    expected_length = line_lengths_map[file_key]
+    processed_lines = []
+    modified = False
+
+    try:
+        original_encoding = "utf-8" # Assume utf-8 by default
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except UnicodeDecodeError:
+            original_encoding = "latin-1" # Fallback to latin-1
+            with open(file_path, "r", encoding="latin-1") as f:
+                lines = f.readlines()
+
+    except Exception as e:
+        print(f"Errore lettura file {file_path} in process_lines_by_length: {e}")
+        # Consider using safe_insert for GUI feedback if this is critical
+        # safe_insert(f"Errore lettura per mod. riga: {os.path.basename(file_path)}")
+        return
+
+    for line in lines:
+        # rstrip() without arguments removes all trailing whitespace, including \n, \r
+        # This is generally fine for length checking of the content itself.
+        original_line_content = line.rstrip()
+
+        if len(original_line_content) != expected_length:
+            modified = True
+            processed_line_content = original_line_content[1:] # Remove the first character
+
+            # Append the original EOL sequence back.
+            # This ensures that if a line was `content\r\n`, it remains so after processing,
+            # not `processed_content\n` if the script runs on Linux/macOS.
+            if line.endswith("\r\n"):
+                processed_lines.append(processed_line_content + "\r\n")
+            elif line.endswith("\n"):
+                processed_lines.append(processed_line_content + "\n")
+            else:
+                # Line had no newline or an unusual one (e.g. just \r, or was last line without EOL)
+                # In this case, just append the processed content.
+                # If it's the last line of a file without a newline, it will remain so.
+                processed_lines.append(processed_line_content)
+            # print(f"[DEBUG] File {file_key}, Path: {file_path}, Expected: {expected_length}, Got: {len(original_line_content)}. Removed first char.")
+        else:
+            processed_lines.append(line) # Line is correct, keep as is
+
+    if modified:
+        try:
+            with open(file_path, "w", encoding=original_encoding) as f: # Write back with detected/original encoding
+                f.writelines(processed_lines)
+            # print(f"[DEBUG] File {file_path} modified by process_lines_by_length.")
+            # safe_insert(f"Mod. righe per lunghezza: {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"Errore scrittura file {file_path} in process_lines_by_length: {e}")
+            # safe_insert(f"Errore scrittura per mod. riga: {os.path.basename(file_path)}")
+
+
 def find_latest_log_file(log_dir_path):
     if not os.path.isdir(log_dir_path):
         print(f"[DEBUG] Log directory not found: {log_dir_path}")
@@ -337,6 +417,7 @@ def run_import():
                     local_path = os.path.join(TEMP_IMPORT_DIR, local_name)
                     with open(local_path, "wb") as f:
                         ftp.retrbinary(f"RETR " + fname, f.write)
+                    process_lines_by_length(local_path, local_name, LINE_LENGTHS_MAP)
                     remove_selected_characters_from_file(local_path)
                     safe_insert(f"Scaricato: {fname}")
                     salva_copia(local_name)
